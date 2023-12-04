@@ -67,10 +67,10 @@ def dice_loss_mask_invalid(logits: torch.Tensor, target:torch.Tensor, smooth=1.)
 
     dice_score = ((2. * intersection + smooth) /
                  (union + smooth))
-    w_dice = nn.Parameter(torch.tensor(0.5))
+
     loss = (1 - dice_score)  # (B, C) tensor
-    
-    return torch.mean(loss)*w_dice
+
+    return torch.mean(loss)
 
 def cross_entropy_loss_mask_invalid(logits: torch.Tensor, target:torch.Tensor, weight:Optional[torch.Tensor]=None) -> float:
     """
@@ -531,32 +531,24 @@ def Boundary_iou_loss_mask_invalid(logits: torch.Tensor, target:torch.Tensor, sm
     Returns:
         averaged loss (float)
     """
-    # print('target0',len(torch.where(target == 1)[0]))
-    # print('target1',len(torch.where(target == 2)[0]))
-    # print('target2',len(torch.where(target == 3)[0]))
     probs = torch.softmax(logits, dim=1)
     prediction = torch.argmax(probs, dim=1).long()
     
     valid = (target != 0)
     target_without_invalids = (target-1) * valid
-    # print('target_without_invalids', target_without_invalids.shape, torch.max(target_without_invalids))
+    pred_without_invalids = prediction * valid
     # target_zeros =torch.zeros_like(target_without_invalids)
     # target_zeros[target_without_invalids == 1] =1
-    pred_without_invalids = prediction * valid
-    # pred_zeros =torch.zeros_like(pred_without_invalids)
-    # pred_zeros[pred_without_invalids == 1] =1
-    # print('pred_without_invalids', pred_zeros.shape, torch.max(pred_zeros))
     
     imgs = []
     gts = []
     kernel = np.ones((3,3), np.uint8)
-
+    imgs = []
+    gts = []
     for img in pred_without_invalids:
         image =  flooding_model.rgb_for_Canny(img)
         logits_c = Canny(image)
         logits_c = cv2.dilate(logits_c, kernel, iterations = 1)
-        # img = img.cpu().numpy()
-        # erosion = cv2.erode(img, kernel, iterations = 1)
         imgs.append(logits_c//255)
 
     for gt in target_without_invalids:
@@ -569,11 +561,11 @@ def Boundary_iou_loss_mask_invalid(logits: torch.Tensor, target:torch.Tensor, sm
         # gts.append(erosion)
 
     imgs = np.array(imgs)
-    boundary_img = torch.tensor(imgs).unsqueeze(1).to(logits.device)
-    # print(boundary_img.shape)
+    boundary_img = torch.tensor(imgs, dtype = torch.float32, device=logits.device).unsqueeze(1)
+    # print('boundary_img',boundary_img.dtype)
     gts = np.array(gts)
-    boundary_gt = torch.tensor(gts).unsqueeze(1).to(logits.device)
-    # print(boundary_gt.shape)
+    boundary_gt = torch.tensor(gts, dtype = torch.float32, device=logits.device).unsqueeze(1)
+   
     
     assert logits.dim() == 4, f"Expected 4D tensor logits"
     assert target.dim() == 3, f"Expected 3D tensor target"
@@ -583,16 +575,17 @@ def Boundary_iou_loss_mask_invalid(logits: torch.Tensor, target:torch.Tensor, sm
 
     target_one_hot_without_invalid = torch.nn.functional.one_hot(target_without_invalids.long(),
                                                                  num_classes=probs.shape[1]).permute(0, 3, 1, 2)  #將tensor的维度换位
+    # target_one_hot_without_invalid = target_one_hot_without_invalid[:, 1, :,:]
     # print('target_one_hot0',len(torch.where(target_one_hot_without_invalid[:,0,:,:] == 1)[0]))
     # print('target_one_hot1',len(torch.where(target_one_hot_without_invalid[:,1,:,:] == 1)[0]))
     # print('target_one_hot2',len(torch.where(target_one_hot_without_invalid[:,2,:,:] == 1)[0]))
     pred_valid = probs * valid.unsqueeze(1).float()  # # Set invalids to 0 (all values in prob tensor are 0
 
     axis_red = (2, 3)  # H, W reduction
-    # gt intersection
+    # # gt intersection
     intersection_gt = (boundary_gt * target_one_hot_without_invalid) # (B, C) tensor
 
-    # pred intersection
+    # # pred intersection
     intersection_pred = (boundary_img * pred_valid)#.sum(dim=axis_red) # (B, C) tensor
 
     # Fn IoU
@@ -601,13 +594,10 @@ def Boundary_iou_loss_mask_invalid(logits: torch.Tensor, target:torch.Tensor, sm
 
     union = total - intersection
     iou_score = (intersection + smooth)/(union + smooth)
-    
     loss = (1 - iou_score)  # (B, C) tensor
-    w_biou = nn.Parameter(torch.tensor(0.5))
-    
-    return torch.mean(loss)*w_biou
+    return torch.mean(loss)
 
-def calc_loss_dice_biou(logits: torch.Tensor, target:torch.Tensor,
+def calc_loss_fc_biou(logits: torch.Tensor, target:torch.Tensor,
                            bce_weight:float=0.5, weight:Optional[torch.Tensor]=None) -> float:
     """
     Weighted Focal loss and IoU loss masking invalids:
@@ -621,17 +611,20 @@ def calc_loss_dice_biou(logits: torch.Tensor, target:torch.Tensor,
     Returns:
 
     """
-    # w_fc = nn.Parameter(torch.tensor(0.5))
-    # w_biou = nn.Parameter(torch.tensor(0.5))
-    # w_iou = nn.Parameter(torch.tensor(0.5))
+    w_fc = nn.Parameter(torch.tensor(0.5))
+    w_biou = nn.Parameter(torch.tensor(0.5))
+    w_dice = nn.Parameter(torch.tensor(0.5))
     
-    # fc = focal_loss_mask_invalid(logits, target, weight=weight, gamma=5, alpha=0.01).requires_grad_()
+    fc = focal_loss_mask_invalid(logits, target, weight=weight, gamma=5, alpha=0.01).requires_grad_()
     biou = Boundary_iou_loss_mask_invalid(logits, target) # (B, C)
-    # iou = iou_loss_mask_invalid(logits, target) 
+    iou = iou_loss_mask_invalid(logits, target) 
     dice = dice_loss_mask_invalid(logits, target)
-    loss = biou + dice
+
+    loss = biou * w_biou + dice * w_dice 
+   
     # Weighted sum
-    return loss
+    return loss, w_biou, w_dice
+
 
 # import matplotlib.pyplot as plt
 # def Hausdorff_Canny_loss_mask_invalid(logits: torch.Tensor, target:torch.Tensor,bce_weight:float=1., 

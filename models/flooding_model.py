@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Tuple
 from ml4floods.preprocess.worldfloods import normalize
 from ml4floods.models.config_setup import  AttrDict
 from pytorch_lightning.utilities.cloud_io import load
+#from lightning_fabric.utilities.cloud_io import _load as load
 
 from ml4floods.models.utils import metrics
 # from ml4floods.models.architectures.baselines import SimpleLinear, SimpleCNN
@@ -17,8 +18,8 @@ from ml4.data.worldfloods.configs import COLORS_WORLDFLOODS_LWC
 from models.architecture import SimpleCNN, ViT, RGB2HSV
 from models.unet_optimize import UNet, UNet_dropout, SimpleUNet, FullUNet, UNET2, Res2_UNET, Res2_DAUNET, AttUNET, Res2_AttUNET, DAUNET, Res2_SAUNET, RDN_Res2_AttUNET
 from models.unet_optimize import UNET2, Res2_UNET, Res2_DAUNET, AttUNET, Res2_AttUNET, Res2_AttUNET_Sup, Simple_Res2Unet, HUNet
-from models.unet_optimize import TransUNet, Res2VTUnet#, MSVTUnet #CvTUnet, 
-from models.Compare_model import UTNet #, SwinTransformerSys, DeepLab_V3_plus,MTUNet,    #MALUNet
+from models.unet_optimize import TransUNet, Res2VTUnet #CvTUnet, 
+from models.unet_optimize import HueVTUnet#, MSVTUnet
 
 from models import losses
 from torch import nn
@@ -183,6 +184,8 @@ class WorldFloodsModel(pl.LightningModule): #bce+dice
                 y (torch.Tensor): (B, W, H) encoded as {0: invalid, 1: land, 2: water, 3: cloud}
         """
         x, y = batch['image'], batch['mask'].squeeze(1)
+        # checkpoint_path = f"yuyu/train_models/ablation/checkpoint/res2vtunet-2023-08-14-10:54:10/epoch=1-step=9708.ckpt"
+        # checkpoint = torch.load(checkpoint_path)
         logits = self.network(x)
         loss = losses.calc_loss_mask_invalid(logits, y, weight=self.weight_per_class.to(self.device))
         if (batch_idx % 100) == 0:
@@ -840,7 +843,7 @@ class WorldFloodsModel_AdaCh(pl.LightningModule): # fc+iou
         }
     
 
-class WorldFloodsModel_Sup(pl.LightningModule): # fc+iou+ssim
+class WorldFloodsModel_Sup(pl.LightningModule): # dice+biou
     """
     Model to do multiclass classification.
     It expects ground truths y (B, H, W) tensors to be encoded as: {0: invalid, 1: clear, 2:water, 3: cloud}
@@ -885,43 +888,22 @@ class WorldFloodsModel_Sup(pl.LightningModule): # fc+iou+ssim
         logits = logits * (has_water).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).float()
         y = y *  (has_water).unsqueeze(-1).unsqueeze(-1)
 
-        loss= losses.calc_loss_dice_biou(logits, y, weight=self.weight_per_class.to(self.device))
+        loss, w_biou, w_dice = losses.calc_loss_fc_biou(logits, y, weight=self.weight_per_class.to(self.device))
 
-###### Part Loss
-        # if (self.trainer.logged_metrics.get('val_iou_loss', 0.3) > 0.293 and not self.boundary_executed):
-        # loss = losses.calc_loss_mask_invalid_3(logits, y)
-        #     self.boundary_executed = False
-        # else :
-        #     loss = losses.Hausdorff_Canny_loss_mask_invalid(logits, y)   
-        #     self.boundary_executed = True
 
-        # # loss = losses.Hausdorff_Canny_loss_mask_invalid(logits, y) 
-        # # print(loss)
-        # if self.reg_lambda > 0:
-        #     regularization_loss = 0
-        #     for param in self.parameters():
-        #         regularization_loss += torch.norm(param, p=2)
-        #     # loss += self.reg_lambda * regularization_loss
-        #     loss = torch.add(loss, self.reg_lambda * regularization_loss)
+        if self.reg_lambda > 0:
+            regularization_loss = 0
+            for param in self.parameters():
+                regularization_loss += torch.norm(param, p=2)
+            # loss += self.reg_lambda * regularization_loss
+            loss = torch.add(loss, self.reg_lambda * regularization_loss)
 
             
-            
-###### Supvision           
-#         for ix in all_layer:
-#             loss = losses.calc_loss_mask_invalid_3(ix, y, weight=self.weight_per_class.to(self.device))
-#             # boundary_loss = losses.Hausdorff_Canny_loss_mask_invalid(ix, y)                          
-#             all_loss.append(boundary_loss)
-#         edge_loss = sum(all_loss) / self.batch_size  # ori:nAvg* bs
-       
-#         compound_loss = loss + edge_loss
-        
-
-
         if (batch_idx % 100) == 0:
             self.log("loss", loss)
-            # self.log("tra_weight_biou", w_biou)
-            # self.log("tra_weight_dice", w_dice)
-            
+            self.log("weight_biou", w_biou)
+            self.log("weight_dice", w_dice)
+            # self.log("part_loss", loss)
 
         # 圖片暫時為最後輸出
         if batch_idx == 0 and self.logger is not None:
@@ -966,33 +948,13 @@ class WorldFloodsModel_Sup(pl.LightningModule): # fc+iou+ssim
         has_water = (gt == 2).any(dim=-1).any(dim=-1).squeeze(1)
         logits = logits * (has_water).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).float()
         y = y *  (has_water).unsqueeze(-1).unsqueeze(-1)
+  
+        biou_loss = losses.Boundary_iou_loss_mask_invalid(logits, y) 
+        dice_loss = losses.dice_loss_mask_invalid(logits, y)
         
-        
-        # all_boundary = []
-        # all_fc = []
-        # all_iou = []
-        # boundary_loss = losses.Hausdorff_Canny_loss_mask_invalid(logits, y)
-        # focal_loss = losses.focal_loss_mask_invalid(logits, y, weight=self.weight_per_class.to(self.device), gamma=5, alpha=0.01)
-        # iou_loss = losses.iou_loss_mask_invalid(logits, y)
-        dice_loss= losses.dice_loss_mask_invalid(logits, y)
-        biou_loss= losses.Boundary_iou_loss_mask_invalid(logits, y) 
-        
-#         for ix in all_layer:
-#             focal_loss = losses.focal_loss_mask_invalid(ix, y, weight=self.weight_per_class.to(self.device), gamma=5, alpha=0.01)
-#             iou_loss = losses.iou_loss_mask_invalid(ix, y)
-#             all_fc.append(focal_loss)
-#             all_iou.append(iou_loss)
-#             # all_boundary.append(boundary_loss)
-          
-#         # boundary_loss = min(all_boundary)
-#         focal_loss = min(all_fc)
-#         iou_loss = min(all_iou)
-
-        # self.log('val_focal_loss', focal_loss)
-        # self.log('val_iou_loss', iou_loss)
-        self.log('val_dice_loss', dice_loss)
         self.log('val_biou_loss', biou_loss)
-        # self.log('val_boundary_loss', bound
+        self.log('val_dice_loss', dice_loss)
+        # self.log('val_boundary_loss', boundary_loss)
         
         pred_categorical = torch.argmax(logits, dim=1).long()  # 返回指定维度最大值的序号
         # print(pred_categorical.shape)
@@ -1015,19 +977,11 @@ class WorldFloodsModel_Sup(pl.LightningModule): # fc+iou+ssim
 
 
     def configure_optimizers(self):
-        # if (self.trainer.logged_metrics.get('val_iou_loss', 0.3) > 0.293 and not self.boundary_executed):
         optimizer = torch.optim.Adam(self.network.parameters(), self.lr)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',
                                                                factor=self.lr_decay, verbose=True,
                                                                patience=self.lr_patience)
-        #     self.boundary_executed = False
-        # else:
-        #     self.lr = 0.0001  # 改变 self.lr 的值
-        #     optimizer = torch.optim.Adam(self.network.parameters(), self.lr)
-        #     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min',
-        #                                                            factor=self.lr_decay, verbose=True,
-        #                                                            patience=self.lr_patience)
-        #     self.boundary_executed = True
+
         return {"optimizer": optimizer, "lr_scheduler": scheduler,
                 "monitor": self.hparams["model_params"]["hyperparameters"]["metric_monitor"]}
 
@@ -1141,9 +1095,6 @@ def configure_architecture(h_params:AttrDict) -> torch.nn.Module:
         
     elif architecture == "res2vtunet":
         model = Res2VTUnet(num_channels, num_classes)
-        
-    # elif architecture == "msvtunet":
-    #     model = MSVTUnet(num_channels, num_classes)
     
     elif architecture == "vit":
         model = ViT(num_channels, num_classes)
@@ -1158,22 +1109,30 @@ def configure_architecture(h_params:AttrDict) -> torch.nn.Module:
     elif architecture == "res2_attunet":
         model = Res2_AttUNET(num_channels, num_classes)
         
-    # elif architecture == "swinunet":
-    #     model = SwinTransformerSys(num_channels, num_classes)
+    elif architecture == "daunet":
+        model = DAUNET(num_channels, num_classes)
         
-    # elif architecture == "deeplabv3+":
-    #     model = DeepLab_V3_plus(num_channels, num_classes)
-
-    # elif architecture == "mtunet":
-    #     model = MTUNet(num_channels, num_classes)
-    elif architecture == "utnet":
-        model = UTNet(num_channels, num_classes)
+    elif architecture == 'res2_daunet':
+        model = Res2_DAUNET(num_channels, num_classes)
+       
+    elif architecture == 'res2_saunet':
+        model = Res2_SAUNET(num_channels, num_classes)
+    
+    elif architecture == 'res2rdn_attunet':
+        model = RDN_Res2_AttUNET(num_channels, num_classes)
         
     elif architecture == 'res2_attunet_sup':
         model = Res2_AttUNET_Sup(num_channels, num_classes)
         
     elif architecture == 'simp_res2unet':
         model = Simple_Res2Unet(num_channels, num_classes)
+
+    ##### ablation #####
+    # elif architecture == 'spavtunet':
+    #     model = SpaVTUnet(num_channels, num_classes)
+
+    elif architecture == 'huevtunet':
+        model = HueVTUnet(num_channels, num_classes)
         
     else:
         raise Exception(f'No model implemented for model_type: {h_params.model_type}')
@@ -1209,11 +1168,16 @@ def rgb_for_Canny(mask, values=[0, 1, 2], colors_cmap=COLORS_WORLDFLOODS_LWC):
     assert len(values) == len(
         colors_cmap), f"Values and colors should have same length {len(values)} {len(colors_cmap)}"
     assert len(mask.shape) == 2, f"Unexpected shape {mask.shape}"
-    mask = mask.cpu()
-    mask_return = np.zeros(mask.shape[:2] + (3,), dtype=np.uint8)
+    
+    # mask_aligned = torch.cuda.FloatTensor(mask.shape).zero_()
+    # mask_aligned.copy_(mask)
+    # mask_return = mask_aligned.cpu()
+    
+    mask_np = mask.detach().cpu().numpy()
+    mask_return = np.zeros(mask_np.shape[:2] + (3,), dtype=np.uint8)
     colores = np.array(np.round(colors_cmap * 255), dtype=np.uint8)
     for i, c in enumerate(colores):
-        mask_return[mask == values[i], :] = c
+        mask_return[mask_np == values[i], :] = c
     return mask_return
 
 # def batch_to_unnorm_rgb(x:torch.Tensor, channel_configuration:str="all", max_clip_val=3000.) -> np.ndarray:

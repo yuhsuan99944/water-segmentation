@@ -833,6 +833,9 @@ class ConvAttention(nn.Module):
         self.to_k = SepConv2d(dim, inner_dim, kernel_size, k_stride, pad)
         self.to_v = SepConv2d(dim, inner_dim, kernel_size, v_stride, pad)
 
+        # self.avg_pool = nn.AdaptiveAvgPool2d(self.img_size//4)
+        # self.max_pool = nn.AdaptiveMaxPool2d(self.img_size//4)
+
         self.to_out = nn.Sequential(
             nn.Linear(inner_dim, dim),
             nn.Dropout(dropout)
@@ -840,8 +843,8 @@ class ConvAttention(nn.Module):
 
     def forward(self, x):
         b, n, _, h = *x.shape, self.heads
-        
         x = rearrange(x, 'b (l w) n -> b n l w', l=self.img_size, w=self.img_size)
+        
         q = self.to_q(x)
         q = rearrange(q, 'b (h d) l w -> b h (l w) d', h=h)
 
@@ -859,90 +862,50 @@ class ConvAttention(nn.Module):
         out = rearrange(out, 'b h n d -> b n (h d)')
         out = self.to_out(out)
         return out
-    
-    
-class SEb(nn.Module):
-    def __init__(self, dim, hidden_dim, dropout = 0.1):
+
+class MSAttention(nn.Module):
+    def __init__(self, dim, img_size, heads, dim_head, kernel_size=3, q_stride=1, k_stride=1, v_stride=1, dropout = 0.1):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(dim, hidden_dim, kernel_size=1, padding=0),
-            nn.ReLU(inplace=True),
-            # nn.Dropout(dropout),
-            nn.Conv2d(hidden_dim, dim, kernel_size=1, padding=0),
-            nn.Dropout(dropout),
-            nn.Sigmoid()
-        )
 
-    def forward(self, inp):
-        b,c,h,w=inp.shape
-        x=inp*self.net(inp)
-        x = rearrange(x, 'b c h w -> b (h w) c', h=h ,w=w)
-        return x
-    
-# class Res2Attention(nn.Module):
-#     def __init__(self, dim, img_size, heads, dim_head, kernel_size=3, q_stride=1, k_stride=1, v_stride=1, dropout = 0.1):
-#         super().__init__()
+        self.img_size = img_size
+        # inner_dim = dim_head *  heads
+        project_out = not (heads == 1 and dim_head == dim)
+        self.res2 = Res2Net(dim, dim)
+        self.heads = heads
+        self.scale = dim_head ** -0.5
+        self.num_feature = int(self.img_size//4)**2#//(self.img_size//4)
 
-#         self.img_size = img_size
-#         # inner_dim = dim_head *  heads
-#         project_out = not (heads == 1 and dim_head == dim)
-#         self.res2 = Res2Net(dim, dim)
-#         self.heads = heads
-#         self.scale = dim_head ** -0.5
-#         self.num_feature = int(self.img_size//4)**2#//(self.img_size//4))
-#         self.weight = nn.Parameter(torch.ones(1,1,1,self.num_feature)) 
-#         self.hue = RGB2HSV()
-#         pad = (kernel_size - q_stride)//2
-#         self.to_q = SepConv2d(dim//4, dim, kernel_size, q_stride, pad)
-#         self.to_k = SepConv2d(dim//4, dim, kernel_size, k_stride, pad)
-#         self.to_v = SepConv2d(dim//4, dim, kernel_size, v_stride, pad)
-        
-# #         self.adj_cossim = adjusted_cosine_similarity()
-# #         self.new_sim = new_sim(dim, heads)
- 
-#         self.linear =nn.Linear(1, (dim//heads)//4, bias=False)
-#         self.ln_v =nn.Linear((dim//4)//heads, (self.img_size//4)**2, bias=False)
-        
-#         self.to_out = nn.Sequential(
-#             nn.Linear(dim, dim),
-#             nn.Dropout(dropout)
-#         ) if project_out else nn.Identity()
-        
-#         self.avg_pool = nn.AdaptiveAvgPool2d(self.img_size//4)
-#         self.max_pool = nn.AdaptiveMaxPool2d(self.img_size//4)
-#         self.out_attention = nn.Linear(dim, dim, bias=False)
-#         self.drop = nn.Dropout(0.1)
+        self.out_attention = nn.Linear(dim, dim, bias=False)
+        self.drop = nn.Dropout(0.1)
 
-#     def forward(self, x):
-#         # print('x',x.device)
-#         b, n, _, h = *x.shape, self.heads
-#         x = rearrange(x, 'b (l w) n -> b n l w', l=self.img_size, w=self.img_size)
-#         res2 = self.res2(x)
+    def forward(self, x):
+        # print('x',x.shape)
+        b, n, _, h = *x.shape, self.heads
+        x = rearrange(x, 'b (l w) n -> b n l w', l=self.img_size, w=self.img_size)
+        res2 = self.res2(x)
         
-#         chunk = [torch.chunk(res2[i], 2, dim=1) for i in range(4)]
-#         pool = [torch.cat((self.avg_pool(chunk[i][0]), self.max_pool(chunk[i][1])), dim=1) for i in range(4)]
+        # chunk = [torch.chunk(res2[i], 2, dim=1) for i in range(4)]
+        # pool = [torch.cat((self.avg_pool(chunk[i][0]), self.max_pool(chunk[i][1])), dim=1) for i in range(4)]
      
-#         q_list = [rearrange(res2[i], 'b (h d) l w -> b h (l w) d', h=self.heads) for i in range(4)]
-#         k_list = [rearrange(pool[i], 'b (h d) l w -> b h (l w) d', h=self.heads) for i in range(4)]
-#         v_list = [rearrange(pool[i], 'b (h d) l w -> b h (l w) d', h=self.heads) for i in range(4)]
-#         # print('q_list', q_list[0])
-#         # print('k_list', k_list[0])
+        q_list = [rearrange(res2[i], 'b (h d) l w -> b h (l w) d', h=self.heads) for i in range(4)]
+        k_list = [rearrange(res2[i], 'b (h d) l w -> b h (l w) d', h=self.heads) for i in range(4)]
+        v_list = [rearrange(res2[i], 'b (h d) l w -> b h (l w) d', h=self.heads) for i in range(4)]
         
-#         att_list = [contract('b h i d, b h j d -> b h i j', q_list[i], k_list[i])*self.scale for i in range(4)]
-#         # print('*',att_list[0].shape)
-#         att_score_list = [torch.softmax(att_list[i], dim=-1) for i in range(4)]
-#         # print('a',att_score_list[0].shape)
-#         x_list = [contract('b h i j, b h j d -> b h i d', att_score_list[i], v_list[i]) for i in range(4)]
-#         # print('av',x_list[0].shape)
-   
+        att_list = [contract('b h i d, b h j d -> b h i j', q_list[i], k_list[i])*self.scale for i in range(4)]
+        # print('*',att_list[0].shape)
+        att_score_list = [torch.softmax(att_list[i], dim=-1) for i in range(4)]
+        # print('a',att_score_list[0].shape)
+        x_list = [contract('b h i j, b h j d -> b h i d', att_score_list[i], v_list[i]) for i in range(4)]
+        # print('av',x_list[0].shape)
 
-#         # 合併所有的 x
-#         x = torch.cat([rearrange(x_list[i], 'b h n d -> b n (h d)') for i in range(4)], dim=2).to(torch.float)
-#         x = self.out_attention(x)
-#         x = self.drop(x)
-#         return x # (b, (h*w), c)
+        # 合併所有的 x
+        x = torch.cat([rearrange(x_list[i], 'b h n d -> b n (h d)') for i in range(4)], dim=2).to(torch.float)
+        x = self.out_attention(x)
+        x = self.drop(x)
+        return x # (b, (h*w), c)
+    
 
+    
 class Res2Attention(nn.Module):
     def __init__(self, dim, img_size, heads, dim_head, kernel_size=3, q_stride=1, k_stride=1, v_stride=1, dropout = 0.1):
         super().__init__()
@@ -955,10 +918,13 @@ class Res2Attention(nn.Module):
         self.scale = dim_head ** -0.5
         self.num_feature = int(self.img_size//4)**2#//(self.img_size//4))
         self.weight = nn.Parameter(torch.ones(1,1,1,self.num_feature)) 
+        self.hue = RGB2HSV()
         pad = (kernel_size - q_stride)//2
         self.to_q = SepConv2d(dim//4, dim, kernel_size, q_stride, pad)
         self.to_k = SepConv2d(dim//4, dim, kernel_size, k_stride, pad)
         self.to_v = SepConv2d(dim//4, dim, kernel_size, v_stride, pad)
+        
+
         
         self.avg_pool = nn.AdaptiveAvgPool2d(self.img_size//4)
         self.max_pool = nn.AdaptiveMaxPool2d(self.img_size//4)
@@ -966,6 +932,7 @@ class Res2Attention(nn.Module):
         self.drop = nn.Dropout(0.1)
 
     def forward(self, x):
+        # print('x',x.shape)
         b, n, _, h = *x.shape, self.heads
         x = rearrange(x, 'b (l w) n -> b n l w', l=self.img_size, w=self.img_size)
         res2 = self.res2(x)

@@ -8,7 +8,7 @@ import numpy as np
 from models.architecture import double_conv, DoubleConv, DoubleConv2 , SeparableConv2d, DoubleSepConv, SEblock, Res2Net, up_conv, DANet, Attblock , PAM, CAM, SANet
 from models.architecture import RGBIR_RDN, RGB2HSV, ASPP_module, _make_layer, _make_MG_unit, ViT, Att_rgbih
 ##### transfomer ###
-from models.architecture import ConvAttention, PreNorm, FeedForward, Res2Attention, SEb, MLP
+from models.architecture import ConvAttention, PreNorm, FeedForward, Res2Attention, MLP, MSAttention
 from models.adach import AdaCh
 
 class UNet(nn.Module):
@@ -1186,10 +1186,6 @@ class Trans_depth(nn.Module):  # mlp -> SE
             [TransformerBlock(dim, img_size, depth, heads, dim_head, mlp_dim, dropout=0.1) for _ in range(depth)])
 
     def forward(self, x):
-        # print('db', x.shape)
-        # print('db_h', h.shape)
-        # x = x[:,:,:-1]
-        # h = x[:,:,-1].unsqueeze(2)
         x, h = torch.chunk(x, 2, dim = 2)
         for block in self.layers:
             x = block(x, h)
@@ -1295,12 +1291,13 @@ class Res2VTUnet(nn.Module):
 
     
     
-#######################################
+############  ablation  #############
+    
 class TransformerBlock(nn.Module):
     def __init__(self, dim, img_size, depth, heads, dim_head, mlp_dim, dropout=0.1):
         super().__init__()
         self.sz = img_size
-        self.mha = Res2Attention(dim, img_size, heads=heads, dim_head=dim_head, dropout=dropout)
+        self.mha = ConvAttention(dim, img_size, heads=heads, dim_head=dim_head, dropout=dropout)
         # self.mlp = SEb(dim, mlp_dim, dropout=dropout)
         self.mlp = MLP(dim, mlp_dim)
 
@@ -1309,11 +1306,11 @@ class TransformerBlock(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
+    def forward(self, x, h):
         mha = self.mha(x)
         ln1 = self.ln1(mha)
         mha = self.dropout(ln1)
-        x = mha + x 
+        x = mha + x + h
         # x = rearrange(x, 'b (h w) c -> b c h w', h=self.sz  ,w=self.sz ) 
         # print('x',x.shape)
         mlp = self.mlp(x)
@@ -1334,9 +1331,9 @@ class Trans_depth(nn.Module):  # mlp -> SE
         # print('db_h', h.shape)
         # x = x[:,:,:-1]
         # h = x[:,:,-1].unsqueeze(2)
-        # x, h = torch.chunk(x, 2, dim = 2)
+        x, h = torch.chunk(x, 2, dim = 2)
         for block in self.layers:
-            x = block(x)
+            x = block(x, h)
         return x
     
 class CvTblock(nn.Module):
@@ -1354,41 +1351,41 @@ class CvTblock(nn.Module):
             Rearrange('b c h w -> b (h w) c', h = self.img_sz_patch, w = self.img_sz_patch),
             nn.LayerNorm(out_ch)
         )
-        # self.hue_embed = nn.Sequential(
-        #     nn.Conv2d(in_ch, out_ch, kernels, strides, padding),
-        #     Rearrange('b c h w -> b (h w) c', h = self.img_sz_patch, w = self.img_sz_patch),
-        #     nn.LayerNorm(out_ch)
-        # )
+        self.hue_embed = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, kernels, strides, padding),
+            Rearrange('b c h w -> b (h w) c', h = self.img_sz_patch, w = self.img_sz_patch),
+            nn.LayerNorm(out_ch)
+        )
         self.transformer = nn.Sequential(
             Trans_depth(out_ch, image_size//patch, self.depth, self.head, dim_head=self.dim,
                                               mlp_dim=out_ch * scale_dim, dropout=dropout),
             Rearrange('b (h w) c -> b c h w', h = self.img_sz_patch, w = self.img_sz_patch)
         )
 
-    def forward(self, img):
+    def forward(self, img, hue):
         x = self.conv_embed(img)  # ([1, 4096, 64])
-        # h = self.hue_embed(hue)   # ([1, 4096, 1])
+        h = self.hue_embed(hue)   # ([1, 4096, 1])
 
-        # xh = torch.cat([x,h], dim = 2)
+        xh = torch.cat([x,h], dim = 2)
         # print('xh', xh.shape, type(xh))
-        x = self.transformer(x)
-        # h = rearrange(h, 'b (h w) c -> b c h w', h=self.img_sz_patch, w=self.img_sz_patch)
-        return x
+        x = self.transformer(xh)
+        h = rearrange(h, 'b (h w) c -> b c h w', h=self.img_sz_patch, w=self.img_sz_patch)
+        return x, h
     
-class MSVTUnet(nn.Module):
+class HueVTUnet(nn.Module):
     def __init__(self, in_ch, n_class, dim = 32, image_size=256, kernels=[5, 3, 3], strides=[4, 2, 2], padding=[1, 1, 1],
                  patch=[4,8,16], heads=[2, 2, 4] , depth = [2, 2, 4], dropout=0.1, emb_dropout=0.):
         super().__init__()
-        # self.h = RGB2HSV()
-        # self.h_conv = nn.Conv2d(1, dim, kernel_size=3, stride=1, padding=1)
+        self.h = RGB2HSV()
+        self.h_conv = nn.Conv2d(1, dim, kernel_size=3, stride=1, padding=1)
         self.in_conv = nn.Conv2d(in_ch, dim, kernel_size=3, stride=1, padding=1)
                      
-        # self.w1_rgbi = nn.Parameter(torch.ones(1,dim,1,1))
-        # self.w1_h = nn.Parameter(torch.ones(1,dim,1,1))
-        # self.w2_rgbi = nn.Parameter(torch.ones(1,dim*2,1,1))
-        # self.w2_h = nn.Parameter(torch.ones(1,dim*2,1,1))
-        # self.w3_rgbi = nn.Parameter(torch.ones(1,dim*4,1,1))
-        # self.w3_h = nn.Parameter(torch.ones(1,dim*4,1,1))
+        self.w1_rgbi = nn.Parameter(torch.ones(1,dim,1,1))
+        self.w1_h = nn.Parameter(torch.ones(1,dim,1,1))
+        self.w2_rgbi = nn.Parameter(torch.ones(1,dim*2,1,1))
+        self.w2_h = nn.Parameter(torch.ones(1,dim*2,1,1))
+        self.w3_rgbi = nn.Parameter(torch.ones(1,dim*4,1,1))
+        self.w3_h = nn.Parameter(torch.ones(1,dim*4,1,1))
 
 
         self.cvt1 = CvTblock(dim, dim*2, image_size, kernels=kernels[0], strides=strides[0], 
@@ -1407,16 +1404,16 @@ class MSVTUnet(nn.Module):
         
 
     def forward(self, x):    
-        # hue = self.h(x)
-        # h = self.h_conv(hue)
+        hue = self.h(x)
+        h = self.h_conv(hue)
         x1=self.in_conv(x)
         # print('c1', x1.shape)
-        x2= self.cvt1(x1)  # torch.Size([1, 64, 64, 64])
+        x2, h2 = self.cvt1(x1*self.w1_rgbi, h*self.w1_h)  # torch.Size([1, 64, 64, 64])
         # print('c2', x2.shape, h2.shape)
-        x3= self.cvt2(x2)
+        x3, h3 = self.cvt2(x2*self.w2_rgbi, h2*self.w2_h)
         # print('c3', x3.shape, h3.shape)
         
-        bt= self.cvt3(x3)
+        bt, _ = self.cvt3(x3*self.w3_rgbi, h3*self.w3_h)
         # print('bt', x.shape)
   
         x = nn.functional.interpolate(bt, scale_factor=2, mode='bilinear', align_corners=True)

@@ -8,7 +8,7 @@ import numpy as np
 from models.architecture import double_conv, DoubleConv, DoubleConv2 , SeparableConv2d, DoubleSepConv, SEblock, Res2Net, up_conv, DANet, Attblock , PAM, CAM, SANet
 from models.architecture import RGBIR_RDN, RGB2HSV, ASPP_module, _make_layer, _make_MG_unit, ViT, Att_rgbih
 ##### transfomer ###
-from models.architecture import ConvAttention, PreNorm, FeedForward, Res2Attention, SEb, MLP
+from models.architecture import ConvAttention, PreNorm, FeedForward, Res2Attention, MLP, MSAttention
 from models.adach import AdaCh
 
 class UNet(nn.Module):
@@ -1186,10 +1186,6 @@ class Trans_depth(nn.Module):  # mlp -> SE
             [TransformerBlock(dim, img_size, depth, heads, dim_head, mlp_dim, dropout=0.1) for _ in range(depth)])
 
     def forward(self, x):
-        # print('db', x.shape)
-        # print('db_h', h.shape)
-        # x = x[:,:,:-1]
-        # h = x[:,:,-1].unsqueeze(2)
         x, h = torch.chunk(x, 2, dim = 2)
         for block in self.layers:
             x = block(x, h)
@@ -1295,144 +1291,145 @@ class Res2VTUnet(nn.Module):
 
     
     
-#######################################
-# class TransformerBlock(nn.Module):
-#     def __init__(self, dim, img_size, depth, heads, dim_head, mlp_dim, dropout=0.1):
-#         super().__init__()
-#         self.sz = img_size
-#         self.mha = Res2Attention(dim, img_size, heads=heads, dim_head=dim_head, dropout=dropout)
-#         # self.mlp = SEb(dim, mlp_dim, dropout=dropout)
-#         self.mlp = MLP(dim, mlp_dim)
-
-#         self.ln1 = nn.LayerNorm(dim)
-#         self.ln2 = nn.LayerNorm(dim)
-
-#         self.dropout = nn.Dropout(dropout)
-
-#     def forward(self, x):
-#         mha = self.mha(x)
-#         ln1 = self.ln1(mha)
-#         mha = self.dropout(ln1)
-#         x = mha + x 
-#         # x = rearrange(x, 'b (h w) c -> b c h w', h=self.sz  ,w=self.sz ) 
-#         # print('x',x.shape)
-#         mlp = self.mlp(x)
-#         ln2 = self.ln2(mlp)
-#         x = ln2 + x
-#         return x
-
-
-# class Trans_depth(nn.Module):  # mlp -> SE
-#     def __init__(self, dim, img_size, depth, heads, dim_head, mlp_dim, dropout=0.):
-#         super().__init__()
-#         self.sz = img_size
-#         self.layers = nn.ModuleList(
-#             [TransformerBlock(dim, img_size, depth, heads, dim_head, mlp_dim, dropout=0.1) for _ in range(depth)])
-
-#     def forward(self, x):
-#         # print('db', x.shape)
-#         # print('db_h', h.shape)
-#         # x = x[:,:,:-1]
-#         # h = x[:,:,-1].unsqueeze(2)
-#         # x, h = torch.chunk(x, 2, dim = 2)
-#         for block in self.layers:
-#             x = block(x)
-#         return x
+############  ablation  #############
     
-# class CvTblock(nn.Module):
-#     def __init__(self, in_ch, out_ch,  image_size, kernels, strides, padding, 
-#                  patch, heads , depth, dropout=0.1, emb_dropout=0., scale_dim=4):
-#         super().__init__()
+class TransformerBlock(nn.Module):
+    def __init__(self, dim, img_size, depth, heads, dim_head, mlp_dim, dropout=0.1):
+        super().__init__()
+        self.sz = img_size
+        self.mha = ConvAttention(dim, img_size, heads=heads, dim_head=dim_head, dropout=dropout)
+        # self.mlp = SEb(dim, mlp_dim, dropout=dropout)
+        self.mlp = MLP(dim, mlp_dim)
 
-#         self.dim = 64
-#         self.head = heads
-#         self.depth = depth
-#         self.img_sz_patch = image_size//patch
+        self.ln1 = nn.LayerNorm(dim)
+        self.ln2 = nn.LayerNorm(dim)
 
-#         self.conv_embed = nn.Sequential(
-#             nn.Conv2d(in_ch, out_ch, kernels, strides, padding),
-#             Rearrange('b c h w -> b (h w) c', h = self.img_sz_patch, w = self.img_sz_patch),
-#             nn.LayerNorm(out_ch)
-#         )
-#         # self.hue_embed = nn.Sequential(
-#         #     nn.Conv2d(in_ch, out_ch, kernels, strides, padding),
-#         #     Rearrange('b c h w -> b (h w) c', h = self.img_sz_patch, w = self.img_sz_patch),
-#         #     nn.LayerNorm(out_ch)
-#         # )
-#         self.transformer = nn.Sequential(
-#             Trans_depth(out_ch, image_size//patch, self.depth, self.head, dim_head=self.dim,
-#                                               mlp_dim=out_ch * scale_dim, dropout=dropout),
-#             Rearrange('b (h w) c -> b c h w', h = self.img_sz_patch, w = self.img_sz_patch)
-#         )
+        self.dropout = nn.Dropout(dropout)
 
-#     def forward(self, img):
-#         x = self.conv_embed(img)  # ([1, 4096, 64])
-#         # h = self.hue_embed(hue)   # ([1, 4096, 1])
+    def forward(self, x, h):
+        mha = self.mha(x)
+        ln1 = self.ln1(mha)
+        mha = self.dropout(ln1)
+        x = mha + x + h
+        # x = rearrange(x, 'b (h w) c -> b c h w', h=self.sz  ,w=self.sz ) 
+        # print('x',x.shape)
+        mlp = self.mlp(x)
+        ln2 = self.ln2(mlp)
+        x = ln2 + x
+        return x
 
-#         # xh = torch.cat([x,h], dim = 2)
-#         # print('xh', xh.shape, type(xh))
-#         x = self.transformer(x)
-#         # h = rearrange(h, 'b (h w) c -> b c h w', h=self.img_sz_patch, w=self.img_sz_patch)
-#         return x
+
+class Trans_depth(nn.Module):  # mlp -> SE
+    def __init__(self, dim, img_size, depth, heads, dim_head, mlp_dim, dropout=0.):
+        super().__init__()
+        self.sz = img_size
+        self.layers = nn.ModuleList(
+            [TransformerBlock(dim, img_size, depth, heads, dim_head, mlp_dim, dropout=0.1) for _ in range(depth)])
+
+    def forward(self, x):
+        # print('db', x.shape)
+        # print('db_h', h.shape)
+        # x = x[:,:,:-1]
+        # h = x[:,:,-1].unsqueeze(2)
+        x, h = torch.chunk(x, 2, dim = 2)
+        for block in self.layers:
+            x = block(x, h)
+        return x
     
-# class MSVTUnet(nn.Module):
-#     def __init__(self, in_ch, n_class, dim = 32, image_size=256, kernels=[5, 3, 3], strides=[4, 2, 2], padding=[1, 1, 1],
-#                  patch=[4,8,16], heads=[2, 2, 4] , depth = [2, 2, 4], dropout=0.1, emb_dropout=0.):
-#         super().__init__()
-#         # self.h = RGB2HSV()
-#         # self.h_conv = nn.Conv2d(1, dim, kernel_size=3, stride=1, padding=1)
-#         self.in_conv = nn.Conv2d(in_ch, dim, kernel_size=3, stride=1, padding=1)
+class CvTblock(nn.Module):
+    def __init__(self, in_ch, out_ch,  image_size, kernels, strides, padding, 
+                 patch, heads , depth, dropout=0.1, emb_dropout=0., scale_dim=4):
+        super().__init__()
+
+        self.dim = 64
+        self.head = heads
+        self.depth = depth
+        self.img_sz_patch = image_size//patch
+
+        self.conv_embed = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, kernels, strides, padding),
+            Rearrange('b c h w -> b (h w) c', h = self.img_sz_patch, w = self.img_sz_patch),
+            nn.LayerNorm(out_ch)
+        )
+        self.hue_embed = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, kernels, strides, padding),
+            Rearrange('b c h w -> b (h w) c', h = self.img_sz_patch, w = self.img_sz_patch),
+            nn.LayerNorm(out_ch)
+        )
+        self.transformer = nn.Sequential(
+            Trans_depth(out_ch, image_size//patch, self.depth, self.head, dim_head=self.dim,
+                                              mlp_dim=out_ch * scale_dim, dropout=dropout),
+            Rearrange('b (h w) c -> b c h w', h = self.img_sz_patch, w = self.img_sz_patch)
+        )
+
+    def forward(self, img, hue):
+        x = self.conv_embed(img)  # ([1, 4096, 64])
+        h = self.hue_embed(hue)   # ([1, 4096, 1])
+
+        xh = torch.cat([x,h], dim = 2)
+        # print('xh', xh.shape, type(xh))
+        x = self.transformer(xh)
+        h = rearrange(h, 'b (h w) c -> b c h w', h=self.img_sz_patch, w=self.img_sz_patch)
+        return x, h
+    
+class HueVTUnet(nn.Module):
+    def __init__(self, in_ch, n_class, dim = 32, image_size=256, kernels=[5, 3, 3], strides=[4, 2, 2], padding=[1, 1, 1],
+                 patch=[4,8,16], heads=[2, 2, 4] , depth = [2, 2, 4], dropout=0.1, emb_dropout=0.):
+        super().__init__()
+        self.h = RGB2HSV()
+        self.h_conv = nn.Conv2d(1, dim, kernel_size=3, stride=1, padding=1)
+        self.in_conv = nn.Conv2d(in_ch, dim, kernel_size=3, stride=1, padding=1)
                      
-#         # self.w1_rgbi = nn.Parameter(torch.ones(1,dim,1,1))
-#         # self.w1_h = nn.Parameter(torch.ones(1,dim,1,1))
-#         # self.w2_rgbi = nn.Parameter(torch.ones(1,dim*2,1,1))
-#         # self.w2_h = nn.Parameter(torch.ones(1,dim*2,1,1))
-#         # self.w3_rgbi = nn.Parameter(torch.ones(1,dim*4,1,1))
-#         # self.w3_h = nn.Parameter(torch.ones(1,dim*4,1,1))
+        self.w1_rgbi = nn.Parameter(torch.ones(1,dim,1,1))
+        self.w1_h = nn.Parameter(torch.ones(1,dim,1,1))
+        self.w2_rgbi = nn.Parameter(torch.ones(1,dim*2,1,1))
+        self.w2_h = nn.Parameter(torch.ones(1,dim*2,1,1))
+        self.w3_rgbi = nn.Parameter(torch.ones(1,dim*4,1,1))
+        self.w3_h = nn.Parameter(torch.ones(1,dim*4,1,1))
 
 
-#         self.cvt1 = CvTblock(dim, dim*2, image_size, kernels=kernels[0], strides=strides[0], 
-#                              padding=padding[0], patch=patch[0], heads=heads[0] , depth = depth[0])
-#         self.cvt2 = CvTblock(dim*2, dim*4, image_size, kernels=kernels[1], strides=strides[1], 
-#                              padding=padding[1], patch=patch[1],heads=heads[1] , depth = depth[1])
-#         self.cvt3 = CvTblock(dim*4, dim*8, image_size, kernels=kernels[2], strides=strides[2], 
-#                              padding=padding[2], patch=patch[2],heads=heads[2] , depth = depth[2])
+        self.cvt1 = CvTblock(dim, dim*2, image_size, kernels=kernels[0], strides=strides[0], 
+                             padding=padding[0], patch=patch[0], heads=heads[0] , depth = depth[0])
+        self.cvt2 = CvTblock(dim*2, dim*4, image_size, kernels=kernels[1], strides=strides[1], 
+                             padding=padding[1], patch=patch[1],heads=heads[1] , depth = depth[1])
+        self.cvt3 = CvTblock(dim*4, dim*8, image_size, kernels=kernels[2], strides=strides[2], 
+                             padding=padding[2], patch=patch[2],heads=heads[2] , depth = depth[2])
         
-#         self.dconv_up3 = DoubleConv(dim*4 + dim*8, dim*4)
-#         self.dconv_up2 = DoubleConv(dim*2 + dim*4, dim*2)
-#         self.dconv_up1 = DoubleConv(dim + dim*2, dim)
+        self.dconv_up3 = DoubleConv(dim*4 + dim*8, dim*4)
+        self.dconv_up2 = DoubleConv(dim*2 + dim*4, dim*2)
+        self.dconv_up1 = DoubleConv(dim + dim*2, dim)
 
-#         self.conv_last = nn.Conv2d(dim, n_class, 1)
-#         self.dropout = nn.Dropout(dropout)
+        self.conv_last = nn.Conv2d(dim, n_class, 1)
+        self.dropout = nn.Dropout(dropout)
         
 
-#     def forward(self, x):    
-#         # hue = self.h(x)
-#         # h = self.h_conv(hue)
-#         x1=self.in_conv(x)
-#         # print('c1', x1.shape)
-#         x2= self.cvt1(x1)  # torch.Size([1, 64, 64, 64])
-#         # print('c2', x2.shape, h2.shape)
-#         x3= self.cvt2(x2)
-#         # print('c3', x3.shape, h3.shape)
+    def forward(self, x):    
+        hue = self.h(x)
+        h = self.h_conv(hue)
+        x1=self.in_conv(x)
+        # print('c1', x1.shape)
+        x2, h2 = self.cvt1(x1*self.w1_rgbi, h*self.w1_h)  # torch.Size([1, 64, 64, 64])
+        # print('c2', x2.shape, h2.shape)
+        x3, h3 = self.cvt2(x2*self.w2_rgbi, h2*self.w2_h)
+        # print('c3', x3.shape, h3.shape)
         
-#         bt= self.cvt3(x3)
-#         # print('bt', x.shape)
+        bt, _ = self.cvt3(x3*self.w3_rgbi, h3*self.w3_h)
+        # print('bt', x.shape)
   
-#         x = nn.functional.interpolate(bt, scale_factor=2, mode='bilinear', align_corners=True)
-#         x = torch.cat([x, x3], dim=1)
-#         d3 = self.dconv_up3(x)
-#         # print('d3', x.shape)
+        x = nn.functional.interpolate(bt, scale_factor=2, mode='bilinear', align_corners=True)
+        x = torch.cat([x, x3], dim=1)
+        d3 = self.dconv_up3(x)
+        # print('d3', x.shape)
         
-#         x = nn.functional.interpolate(d3, scale_factor=2, mode='bilinear', align_corners=True)
-#         x = torch.cat([x, x2], dim=1)
-#         d2 = self.dconv_up2(x)
-#         # print('d2', x.shape)
+        x = nn.functional.interpolate(d3, scale_factor=2, mode='bilinear', align_corners=True)
+        x = torch.cat([x, x2], dim=1)
+        d2 = self.dconv_up2(x)
+        # print('d2', x.shape)
         
-#         x = nn.functional.interpolate(d2, scale_factor=4, mode='bilinear', align_corners=True)
-#         x = torch.cat([x, x1], dim=1)
-#         x = self.dconv_up1(x)        
-#         x = self.dropout(x)
-#         out = self.conv_last(x)
-#         # print('o', out.shape)
-#         return out
+        x = nn.functional.interpolate(d2, scale_factor=4, mode='bilinear', align_corners=True)
+        x = torch.cat([x, x1], dim=1)
+        x = self.dconv_up1(x)        
+        x = self.dropout(x)
+        out = self.conv_last(x)
+        # print('o', out.shape)
+        return out
